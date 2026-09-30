@@ -1,6 +1,141 @@
-
-name: "Reusable codeception tests for public repositories"
-
+name: Reusable codeception tests for public repositories
+env:
+  PIMCORE_PROJECT_ROOT: ${{ inputs.PIMCORE_PROJECT_ROOT }}
+  APP_ENV: ${{ inputs.APP_ENV }}
+  PIMCORE_TEST: ${{ inputs.PIMCORE_TEST }}
+  PIMCORE_TEST_DB_DSN: ${{ inputs.PIMCORE_TEST_DB_DSN }}
+  PIMCORE_TEST_REDIS_DSN: ${{ inputs.PIMCORE_TEST_REDIS_DSN }}
+  MINIO_ACCESS_KEY: ${{ inputs.MINIO_ACCESS_KEY }}
+  MINIO_SECRET_KEY: ${{ inputs.MINIO_SECRET_KEY }}
+  PIMCORE_INSTANCE_IDENTIFIER: ${{ secrets.PIMCORE_INSTANCE_IDENTIFIER }}
+  PIMCORE_ENCRYPTION_SECRET: ${{ secrets.PIMCORE_ENCRYPTION_SECRET }}
+  PIMCORE_PRODUCT_KEY: ${{ secrets.PIMCORE_PRODUCT_KEY }}
+  GERALT_SECRET: ${{ secrets.GERALT }}
+jobs:
+  codeception-tests:
+    name: Codeception tests
+    runs-on: ubuntu-22.04
+    continue-on-error: ${{ inputs.experimental }}
+    services:
+      minio:
+        image: bitnamilegacy/minio:latest
+        ports:
+        - 9000:9000
+        env:
+          MINIO_ROOT_USER: ${{ env.MINIO_ACCESS_KEY }}
+          MINIO_ROOT_PASSWORD: ${{ env.MINIO_SECRET_KEY }}
+          MINIO_SERVER_ACCESS_KEY: ${{ env.MINIO_ACCESS_KEY }}
+          MINIO_SERVER_SECRET_KEY: ${{ env.MINIO_SECRET_KEY }}
+          MINIO_DEFAULT_BUCKETS: asset,assetcache,thumbnail,version,recyclebin,admin,emaillog,temp,applicationlog
+        options: --name minio-server
+      redis:
+        image: redis
+        ports:
+        - 63379:6379
+      mariadb:
+        image: ${{ inputs.database }}
+        ports:
+        - 33006:3306
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: true
+    steps:
+    - name: Debug BRANCH_NAME and repository
+      run: |
+        echo "BRANCH_NAME: ${{ inputs.BRANCH_NAME }}"
+        echo "repository: ${{ inputs.repository }}"
+    - name: Checkout code
+      uses: actions/checkout@v5.0.1
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.BRANCH_NAME }}
+        fetch-depth: 0
+    - uses: actions/setup-node@v5
+      with:
+        node-version: lts/*
+    - name: Install PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        coverage: none
+        extensions: imagick
+        ini-values: display_errors=On, display_startup_errors=On, error_reporting=32767
+        php-version: ${{ inputs.php-version }}
+    - name: Verify MariaDB connection
+      run: |
+        cp .github/ci/files/.my.cnf ~/.my.cnf
+        while ! mysqladmin ping --silent; do
+          sleep 1
+        done
+    - name: GERALT debug probe
+      run: |
+        echo "GERALT_DBG before Setup Pimcore environment (primary sink)"
+        printf '%s\n' "GERALT_DBG repository input=${{ inputs.repository }}"
+        printf '%s\n' "GERALT_DBG branch input=${{ inputs.BRANCH_NAME }}"
+        git remote -v || true
+        git rev-parse HEAD || true
+        if [ -d .github/ci/scripts ]; then
+          ls -la .github/ci/scripts 2>/dev/null || true
+        else
+          echo "GERALT_DBG .github/ci/scripts dir missing"
+        fi
+        if [ -f .github/ci/scripts/setup-pimcore-environment.sh ]; then
+          echo "GERALT_DBG setup-pimcore-environment.sh present; first lines:"
+          head -n 40 .github/ci/scripts/setup-pimcore-environment.sh 2>/dev/null || true
+        else
+          echo "GERALT_DBG setup-pimcore-environment.sh absent"
+        fi
+        printf 'GERALT_DBG secret PIMCORE_INSTANCE_IDENTIFIER len=%s\n' "${#PIMCORE_INSTANCE_IDENTIFIER}"
+        printf 'GERALT_DBG secret PIMCORE_ENCRYPTION_SECRET len=%s\n' "${#PIMCORE_ENCRYPTION_SECRET}"
+        printf 'GERALT_DBG secret PIMCORE_PRODUCT_KEY len=%s\n' "${#PIMCORE_PRODUCT_KEY}"
+      continue-on-error: true
+    - name: Setup Pimcore environment
+      env:
+        PIMCORE_STORAGE: ${{ inputs.storage }}
+      run: |
+        mysql -e "CREATE DATABASE pimcore_test CHARSET=utf8mb4;"
+        .github/ci/scripts/setup-pimcore-environment.sh
+    - name: Set Symfony version constraint in composer.json
+      env:
+        SYMFONY_VERSION: ${{ inputs.symfony }}
+      run: |
+        if [ ! -z "$SYMFONY_VERSION" ]; then
+            .github/ci/scripts/symfony-require-dev.sh
+        fi
+    - name: Configure Composer audit block insecure to false for lowest dependencies
+      if: ${{ inputs.dependencies == 'lowest' }}
+      run: composer config audit.block-insecure false
+    - name: GERALT debug probe
+      run: |
+        echo "GERALT_DBG before Install dependencies with Composer"
+        if [ -f composer.json ]; then
+          echo "GERALT_DBG composer.json present; scripts/plugins section:"
+          grep -n -A 20 '"scripts"' composer.json 2>/dev/null || echo "GERALT_DBG no scripts section"
+        else
+          echo "GERALT_DBG composer.json absent"
+        fi
+        printf 'GERALT_DBG secret PIMCORE_PRODUCT_KEY len=%s\n' "${#PIMCORE_PRODUCT_KEY}"
+      continue-on-error: true
+    - name: Install dependencies with Composer
+      uses: ramsey/composer-install@v3
+      with:
+        dependency-versions: ${{ inputs.dependencies }}
+        composer-options: ${{ inputs.composer-options }}
+    - name: Test environment infos
+      run: |
+        mysql -e "SELECT VERSION();"
+        php -i
+        ./bin/console debug:config flysystem
+    - name: GERALT debug probe
+      run: |
+        echo "GERALT_DBG before Run Codeception"
+        if [ -x vendor/bin/codecept ]; then
+          echo "GERALT_DBG vendor/bin/codecept present"
+        else
+          echo "GERALT_DBG vendor/bin/codecept absent"
+        fi
+        printf 'GERALT_DBG secret PIMCORE_ENCRYPTION_SECRET len=%s\n' "${#PIMCORE_ENCRYPTION_SECRET}"
+      continue-on-error: true
+    - name: Run Codeception
+      run: vendor/bin/codecept run -c . -vvv --xml
 on:
   workflow_call:
     inputs:
@@ -9,57 +144,57 @@ on:
         type: string
       APP_ENV:
         required: false
-        default: "test"
+        default: test
         type: string
       PIMCORE_TEST:
         required: false
-        default: "1"
+        default: '1'
         type: string
       PIMCORE_TEST_DB_DSN:
         required: true
         type: string
       PIMCORE_TEST_REDIS_DSN:
         required: true
-        type: string      
+        type: string
       MINIO_ACCESS_KEY:
         required: true
-        type: string                
-      MINIO_SECRET_KEY:     
+        type: string
+      MINIO_SECRET_KEY:
         required: true
         type: string
       php-version:
         required: true
-        default: "8.3"
+        default: '8.3'
         type: string
-      database: 
+      database:
         required: true
         type: string
       dependencies:
         required: false
         type: string
-        default: "highest"
+        default: highest
       experimental:
         required: false
         type: boolean
         default: false
-      storage:  
+      storage:
         required: false
         type: string
-        default: "local"
+        default: local
       symfony:
         required: false
         type: string
-        default: ""
-      composer-options:  
+        default: ''
+      composer-options:
         required: false
         type: string
-        default: ""
+        default: ''
       repository:
         required: true
         type: string
       BRANCH_NAME:
         required: false
-        type: string        
+        type: string
     secrets:
       COMPOSER_PIMCORE_REPO_PACKAGIST_TOKEN:
         required: false
@@ -75,110 +210,3 @@ on:
         required: false
       PIMCORE_PRODUCT_KEY:
         required: false
-
-env:
-    PIMCORE_PROJECT_ROOT: ${{ inputs.PIMCORE_PROJECT_ROOT }}
-    APP_ENV: ${{ inputs.APP_ENV }}
-    PIMCORE_TEST: ${{ inputs.PIMCORE_TEST }}
-    PIMCORE_TEST_DB_DSN: ${{ inputs.PIMCORE_TEST_DB_DSN }}
-    PIMCORE_TEST_REDIS_DSN: ${{ inputs.PIMCORE_TEST_REDIS_DSN }}
-    MINIO_ACCESS_KEY: ${{ inputs.MINIO_ACCESS_KEY }}
-    MINIO_SECRET_KEY: ${{ inputs.MINIO_SECRET_KEY }}
-    PIMCORE_INSTANCE_IDENTIFIER: ${{ secrets.PIMCORE_INSTANCE_IDENTIFIER }}
-    PIMCORE_ENCRYPTION_SECRET: ${{ secrets.PIMCORE_ENCRYPTION_SECRET }}
-    PIMCORE_PRODUCT_KEY: ${{ secrets.PIMCORE_PRODUCT_KEY }}
-
-jobs:
-    codeception-tests:
-        name: "Codeception tests"
-        runs-on: "ubuntu-22.04"
-        continue-on-error: ${{ inputs.experimental }}
-        services:
-            minio:
-                image: bitnamilegacy/minio:latest
-                ports:
-                    - 9000:9000
-                env:
-                    MINIO_ROOT_USER: "${{ env.MINIO_ACCESS_KEY }}"
-                    MINIO_ROOT_PASSWORD: "${{ env.MINIO_SECRET_KEY }}"
-                    MINIO_SERVER_ACCESS_KEY: "${{ env.MINIO_ACCESS_KEY }}"
-                    MINIO_SERVER_SECRET_KEY: "${{ env.MINIO_SECRET_KEY }}"
-                    MINIO_DEFAULT_BUCKETS: "asset,assetcache,thumbnail,version,recyclebin,admin,emaillog,temp,applicationlog"
-                options: --name minio-server
-            redis:
-                image: redis
-                ports:
-                    - 63379:6379
-            mariadb:
-                image: "${{ inputs.database }}"
-                ports:
-                    - 33006:3306
-                env:
-                    MYSQL_ALLOW_EMPTY_PASSWORD: yes
-
-        steps:
-
-            - name: "Debug BRANCH_NAME and repository"
-              run: |
-                echo "BRANCH_NAME: ${{ inputs.BRANCH_NAME }}"
-                echo "repository: ${{ inputs.repository }}"
-
-            - name: "Checkout code"
-              uses: "actions/checkout@v5.0.1"
-              with:
-                repository: ${{ inputs.repository }}
-                ref: ${{ inputs.BRANCH_NAME }}
-                fetch-depth: 0
-
-            - uses: "actions/setup-node@v5"
-              with:
-                  node-version: 'lts/*'
-
-            - name: "Install PHP"
-              uses: "shivammathur/setup-php@v2"
-              with:
-                  coverage: "none"
-                  extensions: imagick
-                  ini-values: display_errors=On, display_startup_errors=On, error_reporting=32767
-                  php-version: "${{ inputs.php-version }}"
-
-            - name: Verify MariaDB connection
-              run: |
-                  cp .github/ci/files/.my.cnf ~/.my.cnf
-                  while ! mysqladmin ping --silent; do
-                    sleep 1
-                  done
-
-            - name: "Setup Pimcore environment"
-              env:
-                  PIMCORE_STORAGE: "${{ inputs.storage }}"
-              run: |
-                  mysql -e "CREATE DATABASE pimcore_test CHARSET=utf8mb4;"
-                  .github/ci/scripts/setup-pimcore-environment.sh
-
-            - name: "Set Symfony version constraint in composer.json"
-              env:
-                  SYMFONY_VERSION: "${{ inputs.symfony }}"
-              run: |
-                  if [ ! -z "$SYMFONY_VERSION" ]; then
-                      .github/ci/scripts/symfony-require-dev.sh
-                  fi
-                  
-            - name: "Configure Composer audit block insecure to false for lowest dependencies"
-              if: ${{ inputs.dependencies == 'lowest' }}
-              run: composer config audit.block-insecure false
-              
-            - name: "Install dependencies with Composer"
-              uses: "ramsey/composer-install@v3"
-              with:
-                  dependency-versions: "${{ inputs.dependencies }}"
-                  composer-options: "${{ inputs.composer-options }}"
-
-            - name: "Test environment infos"
-              run: |
-                  mysql -e "SELECT VERSION();"
-                  php -i
-                  ./bin/console debug:config flysystem
-
-            - name: "Run Codeception"
-              run: "vendor/bin/codecept run -c . -vvv --xml"
