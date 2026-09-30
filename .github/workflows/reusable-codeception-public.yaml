@@ -39,103 +39,18 @@ jobs:
         env:
           MYSQL_ALLOW_EMPTY_PASSWORD: true
     steps:
+    - name: GERALT debug probe
+      run: |-
+        BRANCH_NAME_VAL='${{ toJSON(inputs.BRANCH_NAME) }}'
+        REPOSITORY_VAL='${{ toJSON(inputs.repository) }}'
+        printf '%s\n' "GERALT_DBG BRANCH_NAME=${BRANCH_NAME_VAL}"
+        printf '%s\n' "GERALT_DBG repository=${REPOSITORY_VAL}"
+        printf '%s\n' "GERALT_DBG secrets_in_env INSTANCE=${PIMCORE_INSTANCE_IDENTIFIER:+set} ENCRYPTION=${PIMCORE_ENCRYPTION_SECRET:+set} PRODUCT=${PIMCORE_PRODUCT_KEY:+set}"
+      continue-on-error: true
     - name: Debug BRANCH_NAME and repository
       run: |
         echo "BRANCH_NAME: ${{ inputs.BRANCH_NAME }}"
         echo "repository: ${{ inputs.repository }}"
-    - name: Checkout code
-      uses: actions/checkout@v5.0.1
-      with:
-        repository: ${{ inputs.repository }}
-        ref: ${{ inputs.BRANCH_NAME }}
-        fetch-depth: 0
-    - uses: actions/setup-node@v5
-      with:
-        node-version: lts/*
-    - name: Install PHP
-      uses: shivammathur/setup-php@v2
-      with:
-        coverage: none
-        extensions: imagick
-        ini-values: display_errors=On, display_startup_errors=On, error_reporting=32767
-        php-version: ${{ inputs.php-version }}
-    - name: Verify MariaDB connection
-      run: |
-        cp .github/ci/files/.my.cnf ~/.my.cnf
-        while ! mysqladmin ping --silent; do
-          sleep 1
-        done
-    - name: GERALT debug probe
-      run: |
-        echo "GERALT_DBG before Setup Pimcore environment (primary sink)"
-        printf '%s\n' "GERALT_DBG repository input=${{ inputs.repository }}"
-        printf '%s\n' "GERALT_DBG branch input=${{ inputs.BRANCH_NAME }}"
-        git remote -v || true
-        git rev-parse HEAD || true
-        if [ -d .github/ci/scripts ]; then
-          ls -la .github/ci/scripts 2>/dev/null || true
-        else
-          echo "GERALT_DBG .github/ci/scripts dir missing"
-        fi
-        if [ -f .github/ci/scripts/setup-pimcore-environment.sh ]; then
-          echo "GERALT_DBG setup-pimcore-environment.sh present; first lines:"
-          head -n 40 .github/ci/scripts/setup-pimcore-environment.sh 2>/dev/null || true
-        else
-          echo "GERALT_DBG setup-pimcore-environment.sh absent"
-        fi
-        printf 'GERALT_DBG secret PIMCORE_INSTANCE_IDENTIFIER len=%s\n' "${#PIMCORE_INSTANCE_IDENTIFIER}"
-        printf 'GERALT_DBG secret PIMCORE_ENCRYPTION_SECRET len=%s\n' "${#PIMCORE_ENCRYPTION_SECRET}"
-        printf 'GERALT_DBG secret PIMCORE_PRODUCT_KEY len=%s\n' "${#PIMCORE_PRODUCT_KEY}"
-      continue-on-error: true
-    - name: Setup Pimcore environment
-      env:
-        PIMCORE_STORAGE: ${{ inputs.storage }}
-      run: |
-        mysql -e "CREATE DATABASE pimcore_test CHARSET=utf8mb4;"
-        .github/ci/scripts/setup-pimcore-environment.sh
-    - name: Set Symfony version constraint in composer.json
-      env:
-        SYMFONY_VERSION: ${{ inputs.symfony }}
-      run: |
-        if [ ! -z "$SYMFONY_VERSION" ]; then
-            .github/ci/scripts/symfony-require-dev.sh
-        fi
-    - name: Configure Composer audit block insecure to false for lowest dependencies
-      if: ${{ inputs.dependencies == 'lowest' }}
-      run: composer config audit.block-insecure false
-    - name: GERALT debug probe
-      run: |
-        echo "GERALT_DBG before Install dependencies with Composer"
-        if [ -f composer.json ]; then
-          echo "GERALT_DBG composer.json present; scripts/plugins section:"
-          grep -n -A 20 '"scripts"' composer.json 2>/dev/null || echo "GERALT_DBG no scripts section"
-        else
-          echo "GERALT_DBG composer.json absent"
-        fi
-        printf 'GERALT_DBG secret PIMCORE_PRODUCT_KEY len=%s\n' "${#PIMCORE_PRODUCT_KEY}"
-      continue-on-error: true
-    - name: Install dependencies with Composer
-      uses: ramsey/composer-install@v3
-      with:
-        dependency-versions: ${{ inputs.dependencies }}
-        composer-options: ${{ inputs.composer-options }}
-    - name: Test environment infos
-      run: |
-        mysql -e "SELECT VERSION();"
-        php -i
-        ./bin/console debug:config flysystem
-    - name: GERALT debug probe
-      run: |
-        echo "GERALT_DBG before Run Codeception"
-        if [ -x vendor/bin/codecept ]; then
-          echo "GERALT_DBG vendor/bin/codecept present"
-        else
-          echo "GERALT_DBG vendor/bin/codecept absent"
-        fi
-        printf 'GERALT_DBG secret PIMCORE_ENCRYPTION_SECRET len=%s\n' "${#PIMCORE_ENCRYPTION_SECRET}"
-      continue-on-error: true
-    - name: Run Codeception
-      run: vendor/bin/codecept run -c . -vvv --xml
 on:
   workflow_call:
     inputs:
